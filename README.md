@@ -16,7 +16,7 @@ Client-side audio transcription and dictation practice application built with Ne
 - **Framework**: Next.js 15 (App Router)
 - **UI**: Tailwind CSS
 - **Transcription**: Whisper WASM (Web Worker)
-- **Storage**: IndexedDB (via idb library)
+- **Storage**: IndexedDB (via Dexie)
 - **Language**: TypeScript
 
 ## Project Structure
