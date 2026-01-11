@@ -1,0 +1,5 @@
+name = "listening-tool"
+compatibility_date = "2026-01-05"
+
+[assets]
+directory = "./out"
