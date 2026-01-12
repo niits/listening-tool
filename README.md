@@ -273,26 +273,20 @@ Tested: Chrome 90+, Firefox 88+, Safari 14+, Edge 90+
 
 If you encounter CORS errors when loading Whisper models:
 
-1. **Ensure prebuild script runs**: The `prebuild` script should run automatically before `build`. Verify model files exist in `public/models/`.
+1. **Ensure prebuild script runs**: The `prebuild` script should run automatically before `build`. It fetches all available model files from HuggingFace API and downloads them.
 
-2. **Check model files**: After build, verify `out/models/Xenova/whisper-base.en/` contains all required files:
-   - `config.json`
-   - `generation_config.json`
-   - `preprocessor_config.json`
-   - `tokenizer_config.json`
-   - `tokenizer.json`
-   - `vocab.json`
-   - `merges.txt`
-   - `onnx/model_quantized.onnx`
-   - `onnx/model.onnx_data`
+2. **Check model files**: After build, verify `out/models/Xenova/whisper-base.en/` contains downloaded files. The script automatically fetches the complete file list from HuggingFace, including:
+   - All JSON configuration files (config.json, tokenizer_config.json, etc.)
+   - All ONNX model weight files
+   - Supporting files (vocab.json, merges.txt, etc.)
 
 3. **Check WASM files**: Verify `out/transformers-wasm/` contains WASM binaries.
 
-4. **Network access during build**: The download script requires internet access to HuggingFace. Ensure your build environment can reach `huggingface.co`.
+4. **Network access during build**: The download script requires internet access to HuggingFace API and CDN. Ensure your build environment can reach `huggingface.co`.
 
 5. **Fallback behavior**: The worker is configured to prefer local models but will fall back to downloading from HuggingFace if local files are not found. In production with a successful build, all files should be local and CORS-free.
 
-6. **Build artifact size**: Large model files may exceed deployment limits. Consider using a smaller model (`whisper-tiny`) or external storage (R2, S3).
+6. **Build artifact size**: The complete model with all files is ~140MB for whisper-base.en. Consider using a smaller model (`whisper-tiny`) or external storage (R2, S3) if size is a concern.
 
 ### Audio Loading Issues
 

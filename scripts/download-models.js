@@ -1,8 +1,8 @@
 /**
  * Download Whisper model files from HuggingFace
  * 
- * This script downloads the required model files during build time
- * to avoid CORS issues when loading from HuggingFace CDN.
+ * This script automatically fetches all available files from HuggingFace
+ * and downloads them to avoid CORS issues when loading from HuggingFace CDN.
  * It also copies WASM files needed by transformers.js.
  */
 
@@ -16,24 +16,54 @@ const { MODEL_ID } = require('../config/model.config.js');
 // consistency with the application code in contexts/TranscriptionContext.tsx
 const MODEL_REVISION = 'main';
 const BASE_URL = `https://huggingface.co/${MODEL_ID}/resolve/${MODEL_REVISION}`;
+const API_URL = `https://huggingface.co/api/models/${MODEL_ID}/tree/${MODEL_REVISION}`;
 
 // Output directory (Next.js public directory)
 const OUTPUT_DIR = path.join(__dirname, '../public/models', MODEL_ID);
 const WASM_OUTPUT_DIR = path.join(__dirname, '../public/transformers-wasm');
 
-// Required model files for Whisper
-const MODEL_FILES = [
-  'config.json',
-  'generation_config.json',
-  'preprocessor_config.json',
-  'tokenizer_config.json',
-  'tokenizer.json',
-  'vocab.json',
-  'merges.txt',
-  // ONNX model files (quantized version for better performance)
-  'onnx/model_quantized.onnx',
-  'onnx/model.onnx_data',
-];
+/**
+ * Fetch the list of files from HuggingFace API
+ */
+function fetchFileList() {
+  return new Promise((resolve, reject) => {
+    console.log('Fetching file list from HuggingFace API...');
+    console.log(`API URL: ${API_URL}`);
+    console.log('');
+    
+    https.get(API_URL, (response) => {
+      let data = '';
+      
+      response.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      response.on('end', () => {
+        try {
+          const files = JSON.parse(data);
+          
+          // Filter to get only files (not directories) and exclude large checkpoint files
+          const fileList = files
+            .filter(item => item.type === 'file')
+            .map(item => item.path)
+            .filter(path => {
+              // Exclude git-related files and very large checkpoint files
+              return !path.startsWith('.git') && 
+                     !path.includes('checkpoint') &&
+                     !path.endsWith('.git');
+            });
+          
+          console.log(`Found ${fileList.length} files to download`);
+          resolve(fileList);
+        } catch (error) {
+          reject(new Error(`Failed to parse API response: ${error.message}`));
+        }
+      });
+    }).on('error', (err) => {
+      reject(err);
+    });
+  });
+}
 
 /**
  * Copy WASM files from node_modules to public directory
@@ -90,7 +120,7 @@ function downloadFile(url, dest) {
     // Skip if file already exists
     if (fs.existsSync(dest)) {
       console.log(`✓ Already exists: ${path.relative(OUTPUT_DIR, dest)}`);
-      resolve();
+      resolve({ status: 'exists' });
       return;
     }
 
@@ -103,8 +133,17 @@ function downloadFile(url, dest) {
       if (response.statusCode === 302 || response.statusCode === 301) {
         const redirectUrl = response.headers.location;
         https.get(redirectUrl, (redirectResponse) => {
+          // Handle 404 - file doesn't exist on server (this is OK, not all files exist for all models)
+          if (redirectResponse.statusCode === 404) {
+            fs.unlink(dest, () => {});
+            console.log(`⚠ Not available: ${path.relative(OUTPUT_DIR, dest)} (404)`);
+            resolve({ status: 'not_found' });
+            return;
+          }
+          
           if (redirectResponse.statusCode !== 200) {
-            reject(new Error(`Failed to download ${url}: ${redirectResponse.statusCode}`));
+            fs.unlink(dest, () => {});
+            reject(new Error(`HTTP ${redirectResponse.statusCode}`));
             return;
           }
           
@@ -123,7 +162,7 @@ function downloadFile(url, dest) {
             file.close();
             console.log(''); // New line after progress
             console.log(`✓ Downloaded: ${path.relative(OUTPUT_DIR, dest)}`);
-            resolve();
+            resolve({ status: 'success' });
           });
         }).on('error', (err) => {
           fs.unlink(dest, (unlinkErr) => {
@@ -136,8 +175,16 @@ function downloadFile(url, dest) {
         return;
       }
 
+      if (response.statusCode === 404) {
+        fs.unlink(dest, () => {});
+        console.log(`⚠ Not available: ${path.relative(OUTPUT_DIR, dest)} (404)`);
+        resolve({ status: 'not_found' });
+        return;
+      }
+
       if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download ${url}: ${response.statusCode}`));
+        fs.unlink(dest, () => {});
+        reject(new Error(`HTTP ${response.statusCode}`));
         return;
       }
 
@@ -160,7 +207,7 @@ function downloadFile(url, dest) {
           console.log(''); // New line after progress
         }
         console.log(`✓ Downloaded: ${path.relative(OUTPUT_DIR, dest)}`);
-        resolve();
+        resolve({ status: 'success' });
       });
     }).on('error', (err) => {
       fs.unlink(dest, (unlinkErr) => {
@@ -188,17 +235,49 @@ async function downloadModels() {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   }
 
+  // Fetch file list from HuggingFace API
+  let fileList;
+  try {
+    fileList = await fetchFileList();
+  } catch (error) {
+    console.error('✗ Failed to fetch file list from HuggingFace:', error.message);
+    console.log('');
+    console.log('⚠ Falling back to downloading with remote model loading at runtime');
+    console.log('');
+    
+    // Copy WASM files even if model download fails
+    copyWasmFiles();
+    
+    console.log('');
+    console.log('='.repeat(60));
+    console.log('Build preparation complete (WASM only)');
+    console.log('='.repeat(60));
+    return;
+  }
+
+  console.log('');
+  console.log('Starting downloads...');
+  console.log('');
+
   // Download each file
   let successCount = 0;
+  let existsCount = 0;
+  let notFoundCount = 0;
   let failCount = 0;
   
-  for (const file of MODEL_FILES) {
+  for (const file of fileList) {
     const url = `${BASE_URL}/${file}`;
     const dest = path.join(OUTPUT_DIR, file);
     
     try {
-      await downloadFile(url, dest);
-      successCount++;
+      const result = await downloadFile(url, dest);
+      if (result.status === 'success') {
+        successCount++;
+      } else if (result.status === 'exists') {
+        existsCount++;
+      } else if (result.status === 'not_found') {
+        notFoundCount++;
+      }
     } catch (error) {
       console.error(`✗ Failed to download ${file}:`, error.message);
       failCount++;
@@ -207,8 +286,54 @@ async function downloadModels() {
 
   console.log('');
   console.log('='.repeat(60));
-  console.log(`Model download complete! (${successCount} succeeded, ${failCount} failed)`);
+  console.log('Model download summary:');
+  console.log(`  Total files: ${fileList.length}`);
+  console.log(`  Downloaded: ${successCount}`);
+  console.log(`  Already existed: ${existsCount}`);
+  console.log(`  Not available (404): ${notFoundCount}`);
+  console.log(`  Failed: ${failCount}`);
   console.log('='.repeat(60));
+  
+  // Verify critical files exist
+  const criticalFiles = [
+    'config.json',
+    'tokenizer_config.json',
+    'tokenizer.json',
+  ];
+  
+  console.log('');
+  console.log('Verifying critical files...');
+  let allCriticalPresent = true;
+  
+  for (const file of criticalFiles) {
+    const filePath = path.join(OUTPUT_DIR, file);
+    if (fs.existsSync(filePath)) {
+      console.log(`✓ ${file}`);
+    } else {
+      console.log(`✗ MISSING: ${file}`);
+      allCriticalPresent = false;
+    }
+  }
+  
+  // Check for at least one ONNX model file
+  const onnxDir = path.join(OUTPUT_DIR, 'onnx');
+  if (fs.existsSync(onnxDir)) {
+    const onnxFiles = fs.readdirSync(onnxDir).filter(f => f.endsWith('.onnx'));
+    if (onnxFiles.length > 0) {
+      console.log(`✓ Found ${onnxFiles.length} ONNX model file(s)`);
+    } else {
+      console.log(`✗ MISSING: No ONNX model files found`);
+      allCriticalPresent = false;
+    }
+  } else {
+    console.log(`⚠ ONNX directory not found (may download on first use)`);
+  }
+  
+  if (!allCriticalPresent) {
+    console.log('');
+    console.log('⚠ WARNING: Some critical files are missing!');
+    console.log('The model may fall back to downloading from HuggingFace at runtime.');
+  }
   
   // Copy WASM files
   copyWasmFiles();

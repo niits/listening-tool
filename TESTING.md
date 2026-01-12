@@ -16,25 +16,21 @@ node scripts/download-models.js
 ```
 
 **Expected Output:**
+- API call to fetch file list from HuggingFace
 - Download progress for each model file
 - Success messages for each downloaded file
 - WASM files copied from node_modules
 - Final "Build preparation complete!" message
 
 **Files Created:**
-- `public/models/Xenova/whisper-base.en/config.json`
-- `public/models/Xenova/whisper-base.en/generation_config.json`
-- `public/models/Xenova/whisper-base.en/preprocessor_config.json`
-- `public/models/Xenova/whisper-base.en/tokenizer_config.json`
-- `public/models/Xenova/whisper-base.en/tokenizer.json`
-- `public/models/Xenova/whisper-base.en/vocab.json`
-- `public/models/Xenova/whisper-base.en/merges.txt`
-- `public/models/Xenova/whisper-base.en/onnx/model_quantized.onnx`
-- `public/models/Xenova/whisper-base.en/onnx/model.onnx_data`
-- `public/transformers-wasm/*.wasm` (4 files)
+The script automatically downloads all available files from the HuggingFace model repository, including:
+- All JSON configuration files (config.json, tokenizer_config.json, preprocessor_config.json, etc.)
+- All ONNX model weight files (quantized and full precision variants)
+- Supporting files (vocab.json, merges.txt, normalizer.json, etc.)
+- WASM files in `public/transformers-wasm/` (4 files)
 
 **File Sizes (Approximate):**
-- Total model files: ~140MB
+- Total model files: ~140MB (whisper-base.en)
 - WASM files: ~37MB
 
 ### 2. Test Build Process
