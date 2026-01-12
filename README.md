@@ -71,7 +71,7 @@ Available models (configure in `/contexts/TranscriptionContext.tsx`):
 - `Xenova/whisper-small` (240MB)
 - `Xenova/whisper-medium` (770MB)
 
-Models run via WebAssembly and are cached on first use.
+**Note**: Models are bundled with the application during build to avoid CORS issues when deployed on edge platforms like Cloudflare Workers. The `prebuild` script automatically downloads model files from HuggingFace and copies necessary WASM files to the `public` directory.
 
 ### Development
 
@@ -83,10 +83,39 @@ Access at http://localhost:3000
 
 ### Production
 
+The build process includes downloading model files:
+
 ```bash
-yarn build
+yarn build  # Runs prebuild script automatically
 yarn start
 ```
+
+The `prebuild` script (`scripts/download-models.js`) performs:
+1. Downloads Whisper model files from HuggingFace
+2. Copies ONNX WASM files from node_modules
+3. Places files in `public/models/` and `public/transformers-wasm/`
+
+This ensures models are served from the same origin, preventing CORS errors on edge deployments.
+
+## Deployment
+
+### Cloudflare Workers (Pages)
+
+The application is configured for deployment on Cloudflare Workers via `wrangler.toml`:
+
+```bash
+# Deploy to Cloudflare Workers
+yarn build
+wrangler pages deploy out
+```
+
+The build artifact includes:
+- Static Next.js pages in `/out`
+- Bundled Whisper model files
+- WASM binaries for transformers.js
+- All necessary assets served from same origin
+
+**Note**: Model files add ~140MB to build artifact. Ensure your Cloudflare Workers plan supports this size, or consider using Cloudflare R2 for model storage.
 
 ## Architecture
 
@@ -239,6 +268,26 @@ const wer = calculateWER(reference, userInput);
 Tested: Chrome 90+, Firefox 88+, Safari 14+, Edge 90+
 
 ## Troubleshooting
+
+### CORS Issues with Model Loading
+
+If you encounter CORS errors when loading Whisper models:
+
+1. **Ensure prebuild script runs**: The `prebuild` script should run automatically before `build`. Verify model files exist in `public/models/`.
+
+2. **Check model files**: After build, verify `out/models/Xenova/whisper-base.en/` contains all required files:
+   - `config.json`
+   - `tokenizer_config.json`
+   - `tokenizer.json`
+   - `vocab.json`
+   - `merges.txt`
+   - `onnx/model_quantized.onnx`
+
+3. **Check WASM files**: Verify `out/transformers-wasm/` contains WASM binaries.
+
+4. **Network access during build**: The download script requires internet access to HuggingFace. Ensure your build environment can reach `huggingface.co`.
+
+5. **Build artifact size**: Large model files may exceed deployment limits. Consider using a smaller model (`whisper-tiny`) or external storage (R2, S3).
 
 ### Audio Loading Issues
 
