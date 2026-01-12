@@ -9,9 +9,11 @@
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
+const { MODEL_ID } = require('../config/model.config.js');
 
 // Model configuration
-const MODEL_ID = 'Xenova/whisper-base.en';
+// NOTE: MODEL_ID is imported from config/model.config.js to ensure
+// consistency with the application code in contexts/TranscriptionContext.tsx
 const MODEL_REVISION = 'main';
 const BASE_URL = `https://huggingface.co/${MODEL_ID}/resolve/${MODEL_REVISION}`;
 
@@ -124,7 +126,11 @@ function downloadFile(url, dest) {
             resolve();
           });
         }).on('error', (err) => {
-          fs.unlink(dest, () => {});
+          fs.unlink(dest, (unlinkErr) => {
+            if (unlinkErr) {
+              console.error(`  Warning: Failed to cleanup ${dest}:`, unlinkErr.message);
+            }
+          });
           reject(err);
         });
         return;
@@ -157,7 +163,11 @@ function downloadFile(url, dest) {
         resolve();
       });
     }).on('error', (err) => {
-      fs.unlink(dest, () => {});
+      fs.unlink(dest, (unlinkErr) => {
+        if (unlinkErr) {
+          console.error(`  Warning: Failed to cleanup ${dest}:`, unlinkErr.message);
+        }
+      });
       reject(err);
     });
   });

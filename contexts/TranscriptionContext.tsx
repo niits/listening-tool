@@ -15,6 +15,7 @@ import {
   TranscriptionQueueItem,
 } from "@/lib/types";
 import { updateAudioTranscripts, updateQueueItems } from "@/lib/audioCache";
+import { MODEL_ID } from "@/config/model.config";
 
 export interface TranscriptionState {
   isReady: boolean;
@@ -57,7 +58,7 @@ const TranscriptionContext = createContext<
   TranscriptionContextType | undefined
 >(undefined);
 
-const MODEL_URL = "Xenova/whisper-base.en";
+const MODEL_URL = MODEL_ID; // Use shared config
 
 export function TranscriptionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<TranscriptionState>({
