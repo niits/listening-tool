@@ -11,10 +11,10 @@ import {
   AutomaticSpeechRecognitionPipeline,
 } from "@xenova/transformers";
 
-// Configure to use local models bundled with the application
-// This avoids CORS issues when loading from HuggingFace CDN
+// Configure to prefer local models bundled with the application
+// This avoids CORS issues when models are available locally after build
+// The library will check local path first, then fall back to remote if needed
 env.allowLocalModels = true;
-env.allowRemoteModels = false;
 env.localModelPath = "/models/";
 
 // Configure WASM paths to use local files

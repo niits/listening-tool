@@ -277,17 +277,22 @@ If you encounter CORS errors when loading Whisper models:
 
 2. **Check model files**: After build, verify `out/models/Xenova/whisper-base.en/` contains all required files:
    - `config.json`
+   - `generation_config.json`
+   - `preprocessor_config.json`
    - `tokenizer_config.json`
    - `tokenizer.json`
    - `vocab.json`
    - `merges.txt`
    - `onnx/model_quantized.onnx`
+   - `onnx/model.onnx_data`
 
 3. **Check WASM files**: Verify `out/transformers-wasm/` contains WASM binaries.
 
 4. **Network access during build**: The download script requires internet access to HuggingFace. Ensure your build environment can reach `huggingface.co`.
 
-5. **Build artifact size**: Large model files may exceed deployment limits. Consider using a smaller model (`whisper-tiny`) or external storage (R2, S3).
+5. **Fallback behavior**: The worker is configured to prefer local models but will fall back to downloading from HuggingFace if local files are not found. In production with a successful build, all files should be local and CORS-free.
+
+6. **Build artifact size**: Large model files may exceed deployment limits. Consider using a smaller model (`whisper-tiny`) or external storage (R2, S3).
 
 ### Audio Loading Issues
 
