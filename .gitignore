@@ -41,3 +41,7 @@ next-env.d.ts
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Downloaded model files (regenerated during build)
+/public/models/
+/public/transformers-wasm/

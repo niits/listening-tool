@@ -11,8 +11,14 @@ import {
   AutomaticSpeechRecognitionPipeline,
 } from "@xenova/transformers";
 
-// Disable local models - always load from HuggingFace
-env.allowLocalModels = false;
+// Configure to use local models bundled with the application
+// This avoids CORS issues when loading from HuggingFace CDN
+env.allowLocalModels = true;
+env.allowRemoteModels = false;
+env.localModelPath = "/models/";
+
+// Configure WASM paths to use local files
+env.backends.onnx.wasm.wasmPaths = "/transformers-wasm/";
 
 // Type definitions for worker messages
 type WorkerInitMessage = {
