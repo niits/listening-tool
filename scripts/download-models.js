@@ -16,7 +16,7 @@ const { MODEL_ID } = require('../config/model.config.js');
 
 const MODEL_REVISION = 'main';
 const HF_BASE = `https://huggingface.co/${MODEL_ID}/resolve/${MODEL_REVISION}`;
-const HF_API  = `https://huggingface.co/api/models/${MODEL_ID}/tree/${MODEL_REVISION}`;
+const HF_API  = `https://huggingface.co/api/models/${MODEL_ID}/tree/${MODEL_REVISION}?recursive=true`;
 const OUTPUT_DIR      = path.join(__dirname, '../public/models', MODEL_ID);
 const WASM_OUTPUT_DIR = path.join(__dirname, '../public/transformers-wasm');
 const BUCKET_NAME     = 'whisper-models';
