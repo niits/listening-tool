@@ -11,13 +11,17 @@ import {
   AutomaticSpeechRecognitionPipeline,
 } from "@xenova/transformers";
 
-// Configure to prefer local models bundled with the application
-// This avoids CORS issues when models are available locally after build
-// The library will check local path first, then fall back to remote if needed
-env.allowLocalModels = true;
-env.localModelPath = "/models/";
+// Model base URL: R2 public bucket in production, local path in dev
+// NEXT_PUBLIC_R2_MODEL_BASE_URL is injected at build time by Next.js
+const MODEL_BASE_URL = process.env.NEXT_PUBLIC_R2_MODEL_BASE_URL || "/models/";
 
-// Configure WASM paths to use local files
+// Load models from R2 (production) or local public/models/ (dev)
+env.allowLocalModels = true;
+env.localModelPath = MODEL_BASE_URL;
+// Disable HuggingFace CDN fallback to prevent CORS errors in production
+env.allowRemoteModels = false;
+
+// WASM runtime is still bundled locally (files are small, under 25MB limit)
 env.backends.onnx.wasm.wasmPaths = "/transformers-wasm/";
 
 // Type definitions for worker messages

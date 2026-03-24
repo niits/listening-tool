@@ -6,6 +6,7 @@
     "dev": "next dev",
     "prebuild": "node scripts/download-models.js",
     "build": "next build",
+    "upload-models": "node scripts/download-models.js && node scripts/upload-to-r2.js",
     "start": "next start",
     "lint": "next lint .",
     "lint:fix": "next lint . --fix",

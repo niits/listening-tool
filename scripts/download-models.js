@@ -129,8 +129,8 @@ function downloadFile(url, dest) {
     const file = fs.createWriteStream(dest);
     
     https.get(url, (response) => {
-      // Handle redirects
-      if (response.statusCode === 302 || response.statusCode === 301) {
+      // Handle redirects (301 Moved Permanently, 302 Found, 307 Temporary Redirect, 308 Permanent Redirect)
+      if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307 || response.statusCode === 308) {
         const redirectUrl = response.headers.location;
         https.get(redirectUrl, (redirectResponse) => {
           // Handle 404 - file doesn't exist on server (this is OK, not all files exist for all models)
@@ -224,6 +224,22 @@ function downloadFile(url, dest) {
  * Main function to download all model files
  */
 async function downloadModels() {
+  // When R2 is configured, models are served from R2 — no need to bundle locally.
+  // Only WASM files (small, under 25MB) still need to be copied to public/.
+  if (process.env.NEXT_PUBLIC_R2_MODEL_BASE_URL) {
+    console.log('='.repeat(60));
+    console.log(`R2 model URL configured: ${process.env.NEXT_PUBLIC_R2_MODEL_BASE_URL}`);
+    console.log('Skipping model download — copying WASM files only.');
+    console.log('='.repeat(60));
+    console.log('');
+    copyWasmFiles();
+    console.log('');
+    console.log('='.repeat(60));
+    console.log('Build preparation complete (WASM only — models served from R2)');
+    console.log('='.repeat(60));
+    return;
+  }
+
   console.log('='.repeat(60));
   console.log(`Downloading Whisper model: ${MODEL_ID}`);
   console.log(`Output directory: ${OUTPUT_DIR}`);
