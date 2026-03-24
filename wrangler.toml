@@ -1,10 +1,8 @@
 name = "listening-tool"
 compatibility_date = "2026-01-05"
+pages_build_output_dir = "./out"
 
-[assets]
-directory = "./out"
-
-# Set NEXT_PUBLIC_R2_MODEL_BASE_URL in .env.local (local) or Cloudflare Pages
-# dashboard (production) before running `yarn build`.
-# Format: https://pub-{hash}.r2.dev/
-# Get the URL after: wrangler r2 bucket dev-url enable whisper-models
+# Set NEXT_PUBLIC_R2_MODEL_BASE_URL in .env.local (local) or in the Cloudflare
+# Pages dashboard (Settings → Environment variables → Build variables) before
+# running `yarn build`. Format: https://pub-{hash}.r2.dev/
+# Run `yarn setup-cloudflare` to configure everything automatically.

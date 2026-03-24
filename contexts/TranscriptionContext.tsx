@@ -11,7 +11,6 @@ import React, {
 } from "react";
 import {
   WorkerResponse,
-  AudioSegment,
   TranscriptionQueueItem,
 } from "@/lib/types";
 import { updateAudioTranscripts, updateQueueItems } from "@/lib/audioCache";
@@ -21,7 +20,7 @@ export interface TranscriptionState {
   isReady: boolean;
   isProcessing: boolean;
   currentSegment: number | null;
-  transcripts: Map<number, string>;
+  transcripts: Map<string, Map<number, string>>; // audioHash → Map<segmentIndex, text>
   error: string | null;
   currentAudioHash: string | null;
   queueLength: number;
@@ -33,17 +32,20 @@ interface TranscriptionContextType extends TranscriptionState {
     segmentIndex: number,
     pcmData: Float32Array,
     sampleRate: number,
-    audioUrl: string
+    audioUrl: string,
+    audioHash: string
   ) => Promise<string>;
   transcribeAllSegments: (
     segments: Array<{
       segmentIndex: number;
+      audioHash: string;
       pcmData: Float32Array;
       sampleRate: number;
     }>
   ) => void;
-  getTranscript: (segmentIndex: number) => string | null;
-  clearTranscripts: () => void;
+  getTranscript: (audioHash: string, segmentIndex: number) => string | null;
+  getTranscriptsForAudio: (audioHash: string) => Map<number, string>;
+  clearTranscripts: (audioHash?: string) => void;
   setAudioUrl: (url: string, audioHash: string) => void;
   loadCachedTranscripts: (
     transcripts: Map<number, string>,
@@ -51,7 +53,7 @@ interface TranscriptionContextType extends TranscriptionState {
     queueItems?: TranscriptionQueueItem[]
   ) => void;
   clearQueue: () => void;
-  cancelJob: (segmentIndex: number) => void;
+  cancelJob: (audioHash: string, segmentIndex: number) => void;
 }
 
 const TranscriptionContext = createContext<
@@ -73,23 +75,24 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
   });
 
   const workerRef = useRef<Worker | null>(null);
-  const currentAudioUrlRef = useRef<string>("");
+  // Maps audioHash → audioUrl for correct per-audio cache writes
+  const audioUrlMapRef = useRef<Map<string, string>>(new Map());
+  // Tracks current audio hash without stale-closure risk
+  const currentAudioHashRef = useRef<string | null>(null);
+  // Tracks pending one-shot listeners for cleanup on unmount
+  const pendingHandlersRef = useRef<Set<(e: MessageEvent) => void>>(new Set());
 
   /**
    * Initialize worker once
    */
   useEffect(() => {
-    // Create worker
     const worker = new Worker(
       new URL("../workers/stt-worker.ts", import.meta.url),
-      {
-        type: "module",
-      }
+      { type: "module" }
     );
 
     workerRef.current = worker;
 
-    // Set up message handler
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data;
 
@@ -108,20 +111,22 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
 
         case "segment-done":
           setState((prev) => {
-            const newTranscripts = new Map(prev.transcripts);
-            newTranscripts.set(message.segmentIndex, message.text);
+            const allTranscripts = new Map(prev.transcripts);
+            const audioTranscripts = new Map(
+              allTranscripts.get(message.audioHash) ?? new Map<number, string>()
+            );
+            audioTranscripts.set(message.segmentIndex, message.text);
+            allTranscripts.set(message.audioHash, audioTranscripts);
 
-            // Update cache asynchronously
-            if (currentAudioUrlRef.current) {
-              updateAudioTranscripts(
-                currentAudioUrlRef.current,
-                newTranscripts
-              );
+            // Write to the correct audio file's cache
+            const audioUrl = audioUrlMapRef.current.get(message.audioHash);
+            if (audioUrl) {
+              updateAudioTranscripts(audioUrl, audioTranscripts);
             }
 
             return {
               ...prev,
-              transcripts: newTranscripts,
+              transcripts: allTranscripts,
               currentSegment: null,
             };
           });
@@ -141,16 +146,23 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
             const newState = {
               ...prev,
               queueLength: message.queueLength,
-              queueItems: message.queueItems,
+              queueItems: message.queueItems as TranscriptionQueueItem[],
               isProcessing:
                 message.queueLength > 0 ||
                 message.queueItems.some((item) => item.status === "processing"),
             };
 
-            // Update queue in cache
-            if (currentAudioUrlRef.current) {
-              updateQueueItems(currentAudioUrlRef.current, message.queueItems);
-            }
+            // Update cache per audio file
+            const byHash = new Map<string, TranscriptionQueueItem[]>();
+            (message.queueItems as TranscriptionQueueItem[]).forEach((item) => {
+              const list = byHash.get(item.audioHash) ?? [];
+              list.push(item);
+              byHash.set(item.audioHash, list);
+            });
+            byHash.forEach((items, hash) => {
+              const url = audioUrlMapRef.current.get(hash);
+              if (url) updateQueueItems(url, items);
+            });
 
             return newState;
           });
@@ -176,45 +188,47 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
       }));
     };
 
-    // Initialize the worker with model URL
     worker.postMessage({ type: "init", modelUrl: MODEL_URL });
 
-    // Cleanup on unmount
     return () => {
+      // Clean up all pending one-shot handlers before terminating
+      pendingHandlersRef.current.forEach((h) =>
+        worker.removeEventListener("message", h)
+      );
+      pendingHandlersRef.current.clear();
       worker.terminate();
     };
   }, []);
 
   /**
-   * Set the current audio URL (for cache key)
+   * Register audio URL ↔ hash mapping; update currentAudioHash state.
+   * Uses refs to avoid stale-closure issues with rapid successive calls.
    */
-  const setAudioUrl = useCallback(
-    (url: string, audioHash: string) => {
-      // Only clear transcripts if audio actually changed AND we're not loading from cache
-      const isAudioChanging =
-        currentAudioUrlRef.current !== url && currentAudioUrlRef.current !== "";
+  const setAudioUrl = useCallback((url: string, audioHash: string) => {
+    audioUrlMapRef.current.set(audioHash, url);
 
-      if (isAudioChanging) {
-        // Don't clear transcripts here - let the caller manage this
-        setState((prev) => ({
-          ...prev,
-          currentAudioHash: audioHash,
-          currentSegment: null,
-          isProcessing: false,
-        }));
-      } else if (!state.currentAudioHash) {
-        setState((prev) => ({
-          ...prev,
-          currentAudioHash: audioHash,
-        }));
-      }
-      currentAudioUrlRef.current = url;
-    },
-    [state.currentAudioHash]
-  );
+    const isChanging =
+      currentAudioHashRef.current !== null &&
+      currentAudioHashRef.current !== audioHash;
+
+    if (isChanging) {
+      setState((prev) => ({
+        ...prev,
+        currentAudioHash: audioHash,
+        currentSegment: null,
+        isProcessing: false,
+      }));
+    } else if (currentAudioHashRef.current === null) {
+      setState((prev) => ({ ...prev, currentAudioHash: audioHash }));
+    }
+
+    currentAudioHashRef.current = audioHash;
+  }, []);
 
   /**
-   * Load cached transcripts and queue items
+   * Load cached transcripts into the per-audio map.
+   * Does NOT send restore-queue to the worker — the caller's useEffect
+   * handles re-queuing any untranscribed segments.
    */
   const loadCachedTranscripts = useCallback(
     (
@@ -222,89 +236,88 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
       audioHash: string,
       queueItems?: TranscriptionQueueItem[]
     ) => {
-      setState((prev) => ({
-        ...prev,
-        transcripts: new Map(transcripts),
-        currentAudioHash: audioHash,
-        queueItems: queueItems || [],
-        queueLength:
-          queueItems?.filter((item) => item.status === "queued").length || 0,
-        isProcessing:
-          queueItems?.some((item) => item.status === "processing") || false,
-      }));
-
-      // Restore queue to worker if there are queued items
-      if (queueItems && queueItems.length > 0 && workerRef.current) {
-        workerRef.current.postMessage({
-          type: "restore-queue",
-          queueItems,
-        });
-      }
+      setState((prev) => {
+        const allTranscripts = new Map(prev.transcripts);
+        allTranscripts.set(audioHash, new Map(transcripts));
+        return {
+          ...prev,
+          transcripts: allTranscripts,
+          currentAudioHash: audioHash,
+          queueItems: queueItems || [],
+          queueLength:
+            queueItems?.filter((item) => item.status === "queued").length || 0,
+          isProcessing:
+            queueItems?.some((item) => item.status === "processing") || false,
+        };
+      });
     },
     []
   );
 
   /**
-   * Transcribe a segment
+   * Transcribe a single segment.
+   * Checks per-audio cache first; queues in worker if not already done.
    */
   const transcribeSegment = useCallback(
     async (
       segmentIndex: number,
       pcmData: Float32Array,
       sampleRate: number,
-      audioUrl: string
+      audioUrl: string,
+      audioHash: string
     ): Promise<string> => {
       if (!workerRef.current || !state.isReady) {
         throw new Error("Worker not ready");
       }
 
-      // Check if already transcribed
-      if (state.transcripts.has(segmentIndex)) {
-        return state.transcripts.get(segmentIndex)!;
+      // Per-audio duplicate check
+      const audioTranscripts = state.transcripts.get(audioHash);
+      if (audioTranscripts?.has(segmentIndex)) {
+        return audioTranscripts.get(segmentIndex)!;
       }
 
-      // If already processing, wait
-      if (state.isProcessing) {
-        throw new Error("Already processing a segment");
-      }
+      audioUrlMapRef.current.set(audioHash, audioUrl);
 
       return new Promise((resolve, reject) => {
         const handler = (event: MessageEvent<WorkerResponse>) => {
-          const message = event.data;
-
+          const msg = event.data;
           if (
-            message.type === "segment-done" &&
-            message.segmentIndex === segmentIndex
+            msg.type === "segment-done" &&
+            msg.segmentIndex === segmentIndex &&
+            msg.audioHash === audioHash
           ) {
+            pendingHandlersRef.current.delete(handler);
             workerRef.current?.removeEventListener("message", handler);
-            resolve(message.text);
-          } else if (message.type === "error") {
+            resolve(msg.text);
+          } else if (msg.type === "error") {
+            pendingHandlersRef.current.delete(handler);
             workerRef.current?.removeEventListener("message", handler);
-            reject(new Error(message.message));
+            reject(new Error(msg.message));
           }
         };
 
-        workerRef.current?.addEventListener("message", handler);
-
-        // Send transcription request
-        workerRef.current?.postMessage({
+        pendingHandlersRef.current.add(handler);
+        workerRef.current!.addEventListener("message", handler);
+        workerRef.current!.postMessage({
           type: "transcribe",
           segmentIndex,
+          audioHash,
           pcmData,
           sampleRate,
         });
       });
     },
-    [state.isReady, state.isProcessing]
+    [state.isReady, state.transcripts]
   );
 
   /**
-   * Transcribe all segments in batch (they will be queued in worker)
+   * Transcribe all segments in batch (queued in worker).
    */
   const transcribeAllSegments = useCallback(
     (
       segments: Array<{
         segmentIndex: number;
+        audioHash: string;
         pcmData: Float32Array;
         sampleRate: number;
       }>
@@ -313,7 +326,6 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
         throw new Error("Worker not ready");
       }
 
-      // Send all segments to worker queue
       workerRef.current.postMessage({
         type: "batch-transcribe",
         segments,
@@ -327,42 +339,55 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
    */
   const clearQueue = useCallback(() => {
     if (workerRef.current) {
-      workerRef.current.postMessage({
-        type: "clear-queue",
-      });
+      workerRef.current.postMessage({ type: "clear-queue" });
     }
   }, []);
 
   /**
    * Cancel a specific job in the queue
    */
-  const cancelJob = useCallback((segmentIndex: number) => {
+  const cancelJob = useCallback((audioHash: string, segmentIndex: number) => {
     if (workerRef.current) {
       workerRef.current.postMessage({
         type: "cancel-job",
         segmentIndex,
+        audioHash,
       });
     }
   }, []);
 
   /**
-   * Get transcript for a segment
+   * Get transcript for a specific segment of a specific audio file
    */
   const getTranscript = useCallback(
-    (segmentIndex: number): string | null => {
-      return state.transcripts.get(segmentIndex) ?? null;
+    (audioHash: string, segmentIndex: number): string | null => {
+      return state.transcripts.get(audioHash)?.get(segmentIndex) ?? null;
     },
     [state.transcripts]
   );
 
   /**
-   * Clear all transcripts
+   * Get all transcripts for a specific audio file
    */
-  const clearTranscripts = useCallback(() => {
-    setState((prev) => ({
-      ...prev,
-      transcripts: new Map(),
-    }));
+  const getTranscriptsForAudio = useCallback(
+    (audioHash: string): Map<number, string> => {
+      return state.transcripts.get(audioHash) ?? new Map<number, string>();
+    },
+    [state.transcripts]
+  );
+
+  /**
+   * Clear transcripts — optionally scoped to one audio file
+   */
+  const clearTranscripts = useCallback((audioHash?: string) => {
+    setState((prev) => {
+      if (audioHash) {
+        const allTranscripts = new Map(prev.transcripts);
+        allTranscripts.delete(audioHash);
+        return { ...prev, transcripts: allTranscripts };
+      }
+      return { ...prev, transcripts: new Map() };
+    });
   }, []);
 
   const value: TranscriptionContextType = {
@@ -370,6 +395,7 @@ export function TranscriptionProvider({ children }: { children: ReactNode }) {
     transcribeSegment,
     transcribeAllSegments,
     getTranscript,
+    getTranscriptsForAudio,
     clearTranscripts,
     setAudioUrl,
     loadCachedTranscripts,

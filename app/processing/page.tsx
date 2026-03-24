@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useState, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { SegmentProcessingList } from "@/components/SegmentProcessingList";
@@ -36,9 +36,9 @@ function ProcessingPageContent() {
     isReady: workerReady,
     isProcessing: transcribing,
     currentSegment,
-    transcripts,
     error: workerError,
     transcribeAllSegments,
+    getTranscriptsForAudio,
     setAudioUrl,
     clearTranscripts,
     loadCachedTranscripts,
@@ -46,6 +46,11 @@ function ProcessingPageContent() {
     queueItems,
     clearQueue,
   } = useTranscription();
+
+  const audioTranscripts = useMemo(
+    () => (audioHash ? getTranscriptsForAudio(audioHash) : new Map<number, string>()),
+    [audioHash, getTranscriptsForAudio]
+  );
 
   useEffect(() => {
     if (!audioUrl) {
@@ -124,16 +129,17 @@ function ProcessingPageContent() {
     ) {
       // Save segments to cache with current queue state
       const decodedUrl = decodeURIComponent(audioUrl);
-      saveAudioCache(decodedUrl, segments, transcripts, queueItems);
+      saveAudioCache(decodedUrl, segments, audioTranscripts, queueItems);
 
       // Prepare all segments that need transcription (in order)
       const segmentsToTranscribe = [];
       for (let i = 0; i < segments.length; i++) {
-        if (!transcripts.has(i)) {
+        if (!audioTranscripts.has(i)) {
           const pcmData = getSegmentPCM(i, 16000);
           if (pcmData) {
             segmentsToTranscribe.push({
               segmentIndex: i,
+              audioHash: audioHash!,
               pcmData,
               sampleRate: 16000,
             });
@@ -159,7 +165,7 @@ function ProcessingPageContent() {
     audioHash,
     segmentsPushedToQueue,
     lastPushedAudioHash,
-    transcripts,
+    audioTranscripts,
     getSegmentPCM,
     transcribeAllSegments,
     queueItems,
@@ -169,7 +175,7 @@ function ProcessingPageContent() {
     // When all segments are transcribed, navigate to practice page immediately (no animation)
     if (
       segments.length > 0 &&
-      transcripts.size === segments.length &&
+      audioTranscripts.size === segments.length &&
       !transcribing
     ) {
       const timer = setTimeout(() => {
@@ -178,9 +184,9 @@ function ProcessingPageContent() {
 
       return () => clearTimeout(timer);
     }
-  }, [segments.length, transcripts.size, transcribing, router, audioUrl]);
+  }, [segments.length, audioTranscripts.size, transcribing, router, audioUrl]);
 
-  const completedSegments = transcripts.size;
+  const completedSegments = audioTranscripts.size;
   const totalSegments = segments.length;
 
   // Determine navigation eligibility
@@ -263,9 +269,9 @@ function ProcessingPageContent() {
           <div className="p-4 bg-green-50 border border-green-200 rounded-lg mb-4">
             <p className="text-green-800">
               ✓ Audio segmented into {segments.length} parts
-              {loadedFromCache && transcripts.size > 0 && (
+              {loadedFromCache && audioTranscripts.size > 0 && (
                 <span className="ml-2 text-green-600">
-                  ({transcripts.size} segments loaded from cache)
+                  ({audioTranscripts.size} segments loaded from cache)
                 </span>
               )}
             </p>
@@ -297,7 +303,7 @@ function ProcessingPageContent() {
           >
             <SegmentProcessingList
               segments={segments}
-              transcripts={transcripts}
+              transcripts={audioTranscripts}
               currentSegment={currentSegment}
               isProcessing={transcribing}
             />
@@ -315,10 +321,10 @@ function ProcessingPageContent() {
             </div>
           )}
 
-          {canNavigateToPractice && transcripts.size < segments.length && (
+          {canNavigateToPractice && audioTranscripts.size < segments.length && (
             <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg text-center">
               <p className="text-blue-800 mb-2">
-                {transcripts.size} of {segments.length} segments ready
+                {audioTranscripts.size} of {segments.length} segments ready
               </p>
               <button
                 onClick={handleGoToPractice}
@@ -333,7 +339,7 @@ function ProcessingPageContent() {
             </div>
           )}
 
-          {transcripts.size === segments.length && (
+          {audioTranscripts.size === segments.length && (
             <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg text-center">
               <p className="text-green-800 font-medium">
                 ✓ All segments transcribed! Redirecting to practice...

@@ -42,6 +42,7 @@ export type WorkerInitMessage = {
 export type WorkerTranscribeMessage = {
   type: "transcribe";
   segmentIndex: number;
+  audioHash: string;
   pcmData: Float32Array;
   sampleRate: number;
 };
@@ -50,6 +51,7 @@ export type WorkerBatchTranscribeMessage = {
   type: "batch-transcribe";
   segments: Array<{
     segmentIndex: number;
+    audioHash: string;
     pcmData: Float32Array;
     sampleRate: number;
   }>;
@@ -59,11 +61,18 @@ export type WorkerClearQueueMessage = {
   type: "clear-queue";
 };
 
+export type WorkerCancelJobMessage = {
+  type: "cancel-job";
+  segmentIndex: number;
+  audioHash: string;
+};
+
 export type WorkerMessage =
   | WorkerInitMessage
   | WorkerTranscribeMessage
   | WorkerBatchTranscribeMessage
-  | WorkerClearQueueMessage;
+  | WorkerClearQueueMessage
+  | WorkerCancelJobMessage;
 
 export type WorkerReadyResponse = {
   type: "ready";
@@ -72,11 +81,13 @@ export type WorkerReadyResponse = {
 export type WorkerSegmentStartResponse = {
   type: "segment-start";
   segmentIndex: number;
+  audioHash: string;
 };
 
 export type WorkerSegmentDoneResponse = {
   type: "segment-done";
   segmentIndex: number;
+  audioHash: string;
   text: string;
 };
 
@@ -90,6 +101,8 @@ export type WorkerQueueUpdatedResponse = {
   queueLength: number;
   queueItems: Array<{
     segmentIndex: number;
+    audioHash: string;
+    audioUrl?: string;
     status: "queued" | "processing";
   }>;
 };
@@ -109,5 +122,7 @@ export type WorkerResponse =
 // Queue item for tracking
 export interface TranscriptionQueueItem {
   segmentIndex: number;
+  audioHash: string;
+  audioUrl?: string;
   status: "queued" | "processing";
 }

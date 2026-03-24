@@ -10,6 +10,7 @@ import {
   env,
   AutomaticSpeechRecognitionPipeline,
 } from "@xenova/transformers";
+import type { WorkerMessage } from "../lib/types";
 
 // Model base URL: R2 public bucket in production, local path in dev
 // NEXT_PUBLIC_R2_MODEL_BASE_URL is injected at build time by Next.js
@@ -18,58 +19,12 @@ const MODEL_BASE_URL = process.env.NEXT_PUBLIC_R2_MODEL_BASE_URL || "/models/";
 // Load models from R2 (production) or local public/models/ (dev)
 env.allowLocalModels = true;
 env.localModelPath = MODEL_BASE_URL;
-// Disable HuggingFace CDN fallback to prevent CORS errors in production
-env.allowRemoteModels = false;
+// In production (R2 configured): disable HuggingFace CDN to prevent CORS errors.
+// In dev (no R2, no local model files): allow remote fallback to HuggingFace CDN.
+env.allowRemoteModels = !process.env.NEXT_PUBLIC_R2_MODEL_BASE_URL;
 
 // WASM runtime is still bundled locally (files are small, under 25MB limit)
 env.backends.onnx.wasm.wasmPaths = "/transformers-wasm/";
-
-// Type definitions for worker messages
-type WorkerInitMessage = {
-  type: "init";
-  modelUrl: string;
-};
-
-type WorkerTranscribeMessage = {
-  type: "transcribe";
-  segmentIndex: number;
-  pcmData: Float32Array;
-  sampleRate: number;
-};
-
-type WorkerBatchTranscribeMessage = {
-  type: "batch-transcribe";
-  segments: Array<{
-    segmentIndex: number;
-    pcmData: Float32Array;
-    sampleRate: number;
-  }>;
-};
-
-type WorkerClearQueueMessage = {
-  type: "clear-queue";
-};
-
-type WorkerCancelJobMessage = {
-  type: "cancel-job";
-  segmentIndex: number;
-};
-
-type WorkerRestoreQueueMessage = {
-  type: "restore-queue";
-  queueItems: Array<{
-    segmentIndex: number;
-    status: "queued" | "processing";
-  }>;
-};
-
-type WorkerMessage =
-  | WorkerInitMessage
-  | WorkerTranscribeMessage
-  | WorkerBatchTranscribeMessage
-  | WorkerClearQueueMessage
-  | WorkerCancelJobMessage
-  | WorkerRestoreQueueMessage;
 
 // Global state
 let isInitialized = false;
@@ -80,12 +35,15 @@ let currentModel: string | null = null;
 // Queue for batch transcription
 interface QueueItem {
   segmentIndex: number;
+  audioHash: string;
+  audioUrl?: string;
   pcmData: Float32Array;
   sampleRate: number;
 }
 let transcriptionQueue: QueueItem[] = [];
 let isProcessingQueue = false;
 let currentProcessingIndex: number | null = null;
+let currentProcessingItem: QueueItem | null = null;
 
 /**
  * Process the transcription queue sequentially
@@ -108,25 +66,29 @@ async function processQueue(): Promise<void> {
 
   if (item) {
     currentProcessingIndex = item.segmentIndex;
+    currentProcessingItem = item;
 
     // Send detailed queue update
     self.postMessage({
       type: "queue-updated",
       queueLength: transcriptionQueue.length,
       queueItems: [
-        { segmentIndex: item.segmentIndex, status: "processing" },
+        { segmentIndex: item.segmentIndex, audioHash: item.audioHash, audioUrl: item.audioUrl, status: "processing" },
         ...transcriptionQueue.map((q) => ({
           segmentIndex: q.segmentIndex,
+          audioHash: q.audioHash,
+          audioUrl: q.audioUrl,
           status: "queued",
         })),
       ],
     });
 
-    await transcribeSegment(item.segmentIndex, item.pcmData, item.sampleRate);
+    await transcribeSegment(item.segmentIndex, item.audioHash, item.pcmData, item.sampleRate);
   }
 
   // Reset processing flag and continue with next item
   currentProcessingIndex = null;
+  currentProcessingItem = null;
   isProcessingQueue = false;
 
   // Send queue update after processing
@@ -135,6 +97,8 @@ async function processQueue(): Promise<void> {
     queueLength: transcriptionQueue.length,
     queueItems: transcriptionQueue.map((q) => ({
       segmentIndex: q.segmentIndex,
+      audioHash: q.audioHash,
+      audioUrl: q.audioUrl,
       status: "queued",
     })),
   });
@@ -152,19 +116,25 @@ function addToQueue(segments: QueueItem[]): void {
   transcriptionQueue.push(...segments);
 
   const queueItems =
-    currentProcessingIndex !== null
+    currentProcessingItem !== null
       ? [
           {
-            segmentIndex: currentProcessingIndex,
+            segmentIndex: currentProcessingItem.segmentIndex,
+            audioHash: currentProcessingItem.audioHash,
+            audioUrl: currentProcessingItem.audioUrl,
             status: "processing" as const,
           },
           ...transcriptionQueue.map((q) => ({
             segmentIndex: q.segmentIndex,
+            audioHash: q.audioHash,
+            audioUrl: q.audioUrl,
             status: "queued" as const,
           })),
         ]
       : transcriptionQueue.map((q) => ({
           segmentIndex: q.segmentIndex,
+          audioHash: q.audioHash,
+          audioUrl: q.audioUrl,
           status: "queued" as const,
         }));
 
@@ -187,6 +157,7 @@ function clearQueue(): void {
   transcriptionQueue = [];
   isProcessingQueue = false;
   currentProcessingIndex = null;
+  currentProcessingItem = null;
   self.postMessage({
     type: "queue-cleared",
   });
@@ -195,27 +166,33 @@ function clearQueue(): void {
 /**
  * Cancel a specific job in the queue
  */
-function cancelJob(segmentIndex: number): void {
+function cancelJob(segmentIndex: number, audioHash: string): void {
   const initialLength = transcriptionQueue.length;
   transcriptionQueue = transcriptionQueue.filter(
-    (item) => item.segmentIndex !== segmentIndex
+    (item) => !(item.segmentIndex === segmentIndex && item.audioHash === audioHash)
   );
 
   if (initialLength !== transcriptionQueue.length) {
     const queueItems =
-      currentProcessingIndex !== null
+      currentProcessingItem !== null
         ? [
             {
-              segmentIndex: currentProcessingIndex,
+              segmentIndex: currentProcessingItem.segmentIndex,
+              audioHash: currentProcessingItem.audioHash,
+              audioUrl: currentProcessingItem.audioUrl,
               status: "processing" as const,
             },
             ...transcriptionQueue.map((q) => ({
               segmentIndex: q.segmentIndex,
+              audioHash: q.audioHash,
+              audioUrl: q.audioUrl,
               status: "queued" as const,
             })),
           ]
         : transcriptionQueue.map((q) => ({
             segmentIndex: q.segmentIndex,
+            audioHash: q.audioHash,
+            audioUrl: q.audioUrl,
             status: "queued" as const,
           }));
 
@@ -281,6 +258,7 @@ async function initializeModel(modelName: string): Promise<void> {
  */
 async function transcribeSegment(
   segmentIndex: number,
+  audioHash: string,
   pcmData: Float32Array,
   sampleRate: number
 ): Promise<void> {
@@ -293,6 +271,7 @@ async function transcribeSegment(
     self.postMessage({
       type: "segment-start",
       segmentIndex,
+      audioHash,
     });
 
     // Run transcription with @huggingface/transformers
@@ -321,6 +300,7 @@ async function transcribeSegment(
     self.postMessage({
       type: "segment-done",
       segmentIndex,
+      audioHash,
       text,
     });
   } catch (error) {
@@ -347,10 +327,10 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
       break;
 
     case "transcribe":
-      // Single segment transcription (backward compatible)
       addToQueue([
         {
           segmentIndex: event.data.segmentIndex,
+          audioHash: event.data.audioHash,
           pcmData: event.data.pcmData,
           sampleRate: event.data.sampleRate,
         },
@@ -358,34 +338,15 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
       break;
 
     case "batch-transcribe":
-      // Batch transcription - add all segments to queue
       addToQueue(event.data.segments);
       break;
 
     case "clear-queue":
-      // Clear the queue
       clearQueue();
       break;
 
     case "cancel-job":
-      // Cancel a specific job
-      cancelJob(event.data.segmentIndex);
-      break;
-
-    case "restore-queue":
-      // Restore queue from cache (only queued items, not processing)
-      const queuedItems = event.data.queueItems.filter(
-        (item) => item.status === "queued"
-      );
-      if (queuedItems.length > 0) {
-        // Note: We don't have PCM data here, so this is just for display
-        // The actual transcription will need to be triggered separately
-        self.postMessage({
-          type: "queue-updated",
-          queueLength: queuedItems.length,
-          queueItems: queuedItems,
-        });
-      }
+      cancelJob(event.data.segmentIndex, event.data.audioHash);
       break;
 
     default:

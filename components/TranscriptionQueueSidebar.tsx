@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { useTranscription } from "@/contexts/TranscriptionContext";
+import { TranscriptionQueueItem } from "@/lib/types";
 import {
   ChevronLeft,
   ChevronRight,
@@ -10,6 +11,19 @@ import {
   X,
   Trash2,
 } from "lucide-react";
+
+function getDisplayName(item: TranscriptionQueueItem): string {
+  if (item.audioUrl) {
+    try {
+      const pathname = new URL(item.audioUrl).pathname;
+      const name = pathname.split("/").pop();
+      if (name) return decodeURIComponent(name);
+    } catch {
+      // fall through
+    }
+  }
+  return item.audioHash.slice(0, 8);
+}
 
 interface TranscriptionQueueSidebarProps {
   onToggle?: (collapsed: boolean) => void;
@@ -40,9 +54,9 @@ export function TranscriptionQueueSidebar({
   }, [clearQueue]);
 
   const handleCancelJob = useCallback(
-    (segmentIndex: number) => {
-      if (confirm(`Bạn có chắc muốn huỷ job segment #${segmentIndex + 1}?`)) {
-        cancelJob(segmentIndex);
+    (item: TranscriptionQueueItem) => {
+      if (confirm(`Bạn có chắc muốn huỷ job segment #${item.segmentIndex + 1}?`)) {
+        cancelJob(item.audioHash, item.segmentIndex);
       }
     },
     [cancelJob]
@@ -106,6 +120,9 @@ export function TranscriptionQueueSidebar({
                       <p className="text-xs text-blue-700 mt-0.5">
                         Segment #{processingItem.segmentIndex + 1}
                       </p>
+                      <p className="text-xs text-blue-500 mt-0.5 truncate" title={getDisplayName(processingItem)}>
+                        {getDisplayName(processingItem)}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -131,7 +148,7 @@ export function TranscriptionQueueSidebar({
                   </div>
                   {queuedItems.map((item, index) => (
                     <div
-                      key={`${item.segmentIndex}-${index}`}
+                      key={`${item.audioHash}-${item.segmentIndex}-${index}`}
                       className="bg-gray-50 border border-gray-200 rounded-lg p-3 group hover:bg-gray-100 transition-colors"
                     >
                       <div className="flex items-start gap-3">
@@ -143,9 +160,12 @@ export function TranscriptionQueueSidebar({
                           <p className="text-xs text-gray-500 mt-0.5">
                             Segment #{item.segmentIndex + 1}
                           </p>
+                          <p className="text-xs text-gray-400 mt-0.5 truncate" title={getDisplayName(item)}>
+                            {getDisplayName(item)}
+                          </p>
                         </div>
                         <button
-                          onClick={() => handleCancelJob(item.segmentIndex)}
+                          onClick={() => handleCancelJob(item)}
                           className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
                           title="Huỷ job này"
                         >

@@ -7,7 +7,7 @@ import {
   audioBufferToMono,
   extractSegment,
 } from "@/lib/audioLoader";
-import { detectSilenceSegments } from "@/lib/silenceSplitter";
+import { detectSilenceSegmentsAsync } from "@/lib/silenceSplitter";
 import { preparePCMForSTT } from "@/lib/pcmTools";
 import { hashAudioUrl } from "@/lib/db";
 
@@ -63,7 +63,7 @@ export function useAudioProcessing() {
       setState((prev) => ({ ...prev, progress: 50, pcmData }));
 
       // Step 3: Detect silence-based segments and add audioHash + segmentId
-      const baseSegments = detectSilenceSegments(
+      const baseSegments = await detectSilenceSegmentsAsync(
         pcmData,
         audioBuffer.sampleRate
       );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, Suspense } from "react";
+import { useEffect, useState, useRef, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PracticeSegment } from "@/components/PracticeSegment";
 import { useAudioProcessing } from "@/hooks/useAudioProcessing";
@@ -30,13 +30,18 @@ function PracticePageContent() {
   const { segments, processAudio, getSegmentPCM, audioHash } =
     useAudioProcessing();
   const {
-    transcripts,
+    getTranscriptsForAudio,
     transcribeAllSegments,
     isReady: workerReady,
     setAudioUrl,
     queueLength,
     loadCachedTranscripts,
   } = useTranscription();
+
+  const audioTranscripts = useMemo(
+    () => (audioHash ? getTranscriptsForAudio(audioHash) : new Map<number, string>()),
+    [audioHash, getTranscriptsForAudio]
+  );
 
   useEffect(() => {
     if (!audioUrl) {
@@ -118,11 +123,12 @@ function PracticePageContent() {
       const segmentsToTranscribe = [];
       for (let i = 0; i < segments.length; i++) {
         // Check both cached and worker transcripts
-        if (!cachedTranscripts.has(i) && !transcripts.has(i)) {
+        if (!cachedTranscripts.has(i) && !audioTranscripts.has(i)) {
           const pcmData = getSegmentPCM(i, 16000);
           if (pcmData) {
             segmentsToTranscribe.push({
               segmentIndex: i,
+              audioHash: audioHash!,
               pcmData,
               sampleRate: 16000,
             });
@@ -148,23 +154,24 @@ function PracticePageContent() {
     audioHash,
     loadingCache,
     cachedTranscripts,
-    transcripts,
+    audioTranscripts,
     getSegmentPCM,
     transcribeAllSegments,
     segmentsPushedToQueue,
     lastPushedAudioHash,
   ]);
 
-  // Sync transcripts from worker to cachedTranscripts
+  // Sync per-audio transcripts from worker into cachedTranscripts
   useEffect(() => {
+    if (!audioHash) return;
     setCachedTranscripts((prev) => {
       const updated = new Map(prev);
-      transcripts.forEach((text, index) => {
+      audioTranscripts.forEach((text, index) => {
         updated.set(index, text);
       });
       return updated;
     });
-  }, [transcripts]);
+  }, [audioTranscripts, audioHash]);
 
   const handleSegmentComplete = (userInput: string, score: number) => {
     const attempt: UserAttempt = {
