@@ -212,7 +212,7 @@ const corsRules = JSON.stringify([
 const corsTmpFile = path.join(__dirname, '../.cors-rules-tmp.json');
 try {
   fs.writeFileSync(corsTmpFile, corsRules);
-  run(`wrangler r2 bucket cors put ${BUCKET_NAME} --file ${corsTmpFile}`);
+  run(`wrangler r2 bucket cors set ${BUCKET_NAME} --file ${corsTmpFile}`);
   console.log('  ✓ CORS configured (GET/HEAD from any origin)');
 } catch (err) {
   console.warn('  ⚠ Could not set CORS automatically:', err.stderr?.trim() || err.message);
