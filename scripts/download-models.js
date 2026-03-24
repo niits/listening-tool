@@ -1,422 +1,294 @@
 /**
- * Download Whisper model files from HuggingFace
- * 
- * This script automatically fetches all available files from HuggingFace
- * and downloads them to avoid CORS issues when loading from HuggingFace CDN.
- * It also copies WASM files needed by transformers.js.
+ * Download Whisper model files and prepare for build.
+ *
+ * Modes:
+ *  - R2 mode  (CLOUDFLARE_ACCOUNT_ID + R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY):
+ *    Streams files directly HuggingFace → R2. No local disk used for models.
+ *  - Local mode (no R2 credentials):
+ *    Downloads files to public/models/ for bundling in the static artifact.
+ *
+ * R2 credentials — add to .env.local (never commit):
+ *   CLOUDFLARE_ACCOUNT_ID=...
+ *   R2_ACCESS_KEY_ID=...       (from R2 → Manage R2 API Tokens)
+ *   R2_SECRET_ACCESS_KEY=...
  */
 
+const crypto = require('crypto');
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
-const { execSync } = require('child_process');
 const { MODEL_ID } = require('../config/model.config.js');
 
-// Model configuration
-// NOTE: MODEL_ID is imported from config/model.config.js to ensure
-// consistency with the application code in contexts/TranscriptionContext.tsx
 const MODEL_REVISION = 'main';
-const BASE_URL = `https://huggingface.co/${MODEL_ID}/resolve/${MODEL_REVISION}`;
-const API_URL = `https://huggingface.co/api/models/${MODEL_ID}/tree/${MODEL_REVISION}`;
-
-// Output directory (Next.js public directory)
+const HF_BASE = `https://huggingface.co/${MODEL_ID}/resolve/${MODEL_REVISION}`;
+const HF_API = `https://huggingface.co/api/models/${MODEL_ID}/tree/${MODEL_REVISION}`;
 const OUTPUT_DIR = path.join(__dirname, '../public/models', MODEL_ID);
 const WASM_OUTPUT_DIR = path.join(__dirname, '../public/transformers-wasm');
-
-/**
- * Fetch the list of files from HuggingFace API
- */
-function fetchFileList() {
-  return new Promise((resolve, reject) => {
-    console.log('Fetching file list from HuggingFace API...');
-    console.log(`API URL: ${API_URL}`);
-    console.log('');
-
-    https.get(API_URL, (response) => {
-      let data = '';
-
-      response.on('data', (chunk) => {
-        data += chunk;
-      });
-
-      response.on('end', () => {
-        try {
-          const files = JSON.parse(data);
-
-          // Filter to get only files (not directories) and exclude large checkpoint files
-          const fileList = files
-            .filter(item => item.type === 'file')
-            .map(item => item.path)
-            .filter(path => {
-              // Exclude git-related files and very large checkpoint files
-              return !path.startsWith('.git') &&
-                !path.includes('checkpoint') &&
-                !path.endsWith('.git');
-            });
-
-          console.log(`Found ${fileList.length} files to download`);
-          resolve(fileList);
-        } catch (error) {
-          reject(new Error(`Failed to parse API response: ${error.message}`));
-        }
-      });
-    }).on('error', (err) => {
-      reject(err);
-    });
-  });
-}
-
-/**
- * Copy WASM files from node_modules to public directory
- */
-function copyWasmFiles() {
-  console.log('');
-  console.log('Copying WASM files...');
-  console.log('');
-
-  const wasmSourceDir = path.join(__dirname, '../node_modules/@xenova/transformers/dist');
-  const wasmFiles = [
-    'ort-wasm.wasm',
-    'ort-wasm-simd.wasm',
-    'ort-wasm-threaded.wasm',
-    'ort-wasm-simd-threaded.wasm',
-  ];
-
-  // Create WASM output directory
-  if (!fs.existsSync(WASM_OUTPUT_DIR)) {
-    fs.mkdirSync(WASM_OUTPUT_DIR, { recursive: true });
-  }
-
-  for (const file of wasmFiles) {
-    const src = path.join(wasmSourceDir, file);
-    const dest = path.join(WASM_OUTPUT_DIR, file);
-
-    try {
-      if (fs.existsSync(src)) {
-        fs.copyFileSync(src, dest);
-        console.log(`✓ Copied: ${file}`);
-      } else {
-        console.log(`⚠ Not found: ${file}`);
-      }
-    } catch (error) {
-      console.error(`✗ Failed to copy ${file}:`, error.message);
-    }
-  }
-
-  console.log('');
-  console.log('WASM files copied successfully!');
-}
-
-/**
- * Download a file from URL to destination
- */
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    // Create directory if it doesn't exist
-    const dir = path.dirname(dest);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    // Skip if file already exists
-    if (fs.existsSync(dest)) {
-      console.log(`✓ Already exists: ${path.relative(OUTPUT_DIR, dest)}`);
-      resolve({ status: 'exists' });
-      return;
-    }
-
-    console.log(`Downloading: ${path.relative(OUTPUT_DIR, dest)}`);
-
-    const file = fs.createWriteStream(dest);
-
-    https.get(url, (response) => {
-      // Handle redirects (301 Moved Permanently, 302 Found, 307 Temporary Redirect, 308 Permanent Redirect)
-      if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307 || response.statusCode === 308) {
-        const redirectUrl = response.headers.location;
-        https.get(redirectUrl, (redirectResponse) => {
-          // Handle 404 - file doesn't exist on server (this is OK, not all files exist for all models)
-          if (redirectResponse.statusCode === 404) {
-            fs.unlink(dest, () => { });
-            console.log(`⚠ Not available: ${path.relative(OUTPUT_DIR, dest)} (404)`);
-            resolve({ status: 'not_found' });
-            return;
-          }
-
-          if (redirectResponse.statusCode !== 200) {
-            fs.unlink(dest, () => { });
-            reject(new Error(`HTTP ${redirectResponse.statusCode}`));
-            return;
-          }
-
-          const totalSize = parseInt(redirectResponse.headers['content-length'], 10);
-          let downloadedSize = 0;
-
-          redirectResponse.on('data', (chunk) => {
-            downloadedSize += chunk.length;
-            const progress = ((downloadedSize / totalSize) * 100).toFixed(1);
-            process.stdout.write(`\r  Progress: ${progress}% (${(downloadedSize / 1024 / 1024).toFixed(1)}MB / ${(totalSize / 1024 / 1024).toFixed(1)}MB)`);
-          });
-
-          redirectResponse.pipe(file);
-
-          file.on('finish', () => {
-            file.close();
-            console.log(''); // New line after progress
-            console.log(`✓ Downloaded: ${path.relative(OUTPUT_DIR, dest)}`);
-            resolve({ status: 'success' });
-          });
-        }).on('error', (err) => {
-          fs.unlink(dest, (unlinkErr) => {
-            if (unlinkErr) {
-              console.error(`  Warning: Failed to cleanup ${dest}:`, unlinkErr.message);
-            }
-          });
-          reject(err);
-        });
-        return;
-      }
-
-      if (response.statusCode === 404) {
-        fs.unlink(dest, () => { });
-        console.log(`⚠ Not available: ${path.relative(OUTPUT_DIR, dest)} (404)`);
-        resolve({ status: 'not_found' });
-        return;
-      }
-
-      if (response.statusCode !== 200) {
-        fs.unlink(dest, () => { });
-        reject(new Error(`HTTP ${response.statusCode}`));
-        return;
-      }
-
-      const totalSize = parseInt(response.headers['content-length'], 10);
-      let downloadedSize = 0;
-
-      response.on('data', (chunk) => {
-        downloadedSize += chunk.length;
-        if (totalSize) {
-          const progress = ((downloadedSize / totalSize) * 100).toFixed(1);
-          process.stdout.write(`\r  Progress: ${progress}% (${(downloadedSize / 1024 / 1024).toFixed(1)}MB / ${(totalSize / 1024 / 1024).toFixed(1)}MB)`);
-        }
-      });
-
-      response.pipe(file);
-
-      file.on('finish', () => {
-        file.close();
-        if (totalSize) {
-          console.log(''); // New line after progress
-        }
-        console.log(`✓ Downloaded: ${path.relative(OUTPUT_DIR, dest)}`);
-        resolve({ status: 'success' });
-      });
-    }).on('error', (err) => {
-      fs.unlink(dest, (unlinkErr) => {
-        if (unlinkErr) {
-          console.error(`  Warning: Failed to cleanup ${dest}:`, unlinkErr.message);
-        }
-      });
-      reject(err);
-    });
-  });
-}
-
 const BUCKET_NAME = 'whisper-models';
+const CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
 const CONTENT_TYPES = {
   '.json': 'application/json',
   '.onnx': 'application/octet-stream',
   '.wasm': 'application/wasm',
   '.txt': 'text/plain',
+  '.md': 'text/markdown',
   '.model': 'application/octet-stream',
 };
 
-function getContentType(filePath) {
-  return CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+function contentType(file) {
+  return CONTENT_TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
 }
 
-function getAllLocalFiles(dir, results = []) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) getAllLocalFiles(full, results);
-    else results.push(full);
-  }
-  return results;
+// ── HTTP GET following redirects (handles relative Location headers) ───────
+function get(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        const loc = res.headers.location;
+        res.resume();
+        get(loc.startsWith('http') ? loc : `https://huggingface.co${loc}`)
+          .then(resolve).catch(reject);
+        return;
+      }
+      resolve(res);
+    }).on('error', reject);
+  });
 }
 
-function existsInR2(r2Key) {
-  try {
-    execSync(`wrangler r2 object head "${BUCKET_NAME}/${r2Key}"`, { stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
+// ── Fetch model file list from HuggingFace API ─────────────────────────────
+async function fetchFileList() {
+  process.stdout.write('Fetching file list from HuggingFace... ');
+  const res = await get(HF_API);
+  const data = await new Promise((resolve, reject) => {
+    let buf = '';
+    res.on('data', c => buf += c);
+    res.on('end', () => resolve(buf));
+    res.on('error', reject);
+  });
+  const files = JSON.parse(data)
+    .filter(f => f.type === 'file')
+    .map(f => f.path)
+    .filter(p => !p.startsWith('.git') && !p.includes('checkpoint'));
+  console.log(`${files.length} files`);
+  return files;
 }
 
-function uploadFileToR2(localPath) {
-  const relativePath = path.relative(path.join(__dirname, '../public/models'), localPath);
-  const r2Key = relativePath.split(path.sep).join('/');
-  const contentType = getContentType(localPath);
-  const sizeMB = (fs.statSync(localPath).size / 1024 / 1024).toFixed(1);
+// ── AWS SigV4 signing for R2 S3-compatible API ─────────────────────────────
+// extraHeaders: plain object of additional headers to sign (e.g. { host })
+// Always adds x-amz-date and x-amz-content-sha256 (UNSIGNED-PAYLOAD).
+function sigV4(method, r2Path, extraHeaders, secretKey, accessKeyId) {
+  const now = new Date();
+  const datetime = now.toISOString().replace(/[:-]/g, '').replace(/\.\d{3}/, '');
+  const dateStr = datetime.slice(0, 8);
 
-  process.stdout.write(`Uploading: ${r2Key} (${sizeMB}MB)...`);
-  execSync(
-    `wrangler r2 object put "${BUCKET_NAME}/${r2Key}" --file "${localPath}" --content-type "${contentType}" --cache-control "public, max-age=31536000, immutable"`,
-    { stdio: 'pipe' }
+  const toSign = {
+    ...extraHeaders,
+    'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
+    'x-amz-date': datetime,
+  };
+
+  const entries = Object.entries(toSign).sort(([a], [b]) => a.localeCompare(b));
+  const canonicalHeaders = entries.map(([k, v]) => `${k}:${v}`).join('\n') + '\n';
+  const signedHeaders = entries.map(([k]) => k).join(';');
+  const canonicalReq = [method, r2Path, '', canonicalHeaders, signedHeaders, 'UNSIGNED-PAYLOAD'].join('\n');
+
+  const credentialScope = `${dateStr}/auto/s3/aws4_request`;
+  const stringToSign = [
+    'AWS4-HMAC-SHA256', datetime, credentialScope,
+    crypto.createHash('sha256').update(canonicalReq).digest('hex'),
+  ].join('\n');
+
+  const signingKey = ['auto', 's3', 'aws4_request'].reduce(
+    (key, part) => crypto.createHmac('sha256', key).update(part).digest(),
+    crypto.createHmac('sha256', `AWS4${secretKey}`).update(dateStr).digest()
   );
-  console.log(' done');
+  const signature = crypto.createHmac('sha256', signingKey).update(stringToSign).digest('hex');
+
+  return {
+    ...Object.fromEntries(entries),
+    authorization: `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+  };
 }
 
-/**
- * Main function:
- *  - R2 mode: check R2 first, only download files missing from R2, upload them, remove locals
- *  - Local mode: download files missing locally, keep for bundling
- */
-async function downloadModels() {
-  const useR2 = !!process.env.NEXT_PUBLIC_R2_MODEL_BASE_URL;
+// ── Check if object already exists in R2 ──────────────────────────────────
+function existsInR2(r2Key, { accountId, accessKeyId, secretKey }) {
+  return new Promise((resolve) => {
+    const host = `${accountId}.r2.cloudflarestorage.com`;
+    const r2Path = `/${BUCKET_NAME}/${r2Key}`;
+    const headers = sigV4('HEAD', r2Path, { host }, secretKey, accessKeyId);
+    const req = https.request(
+      { hostname: host, path: r2Path, method: 'HEAD', headers },
+      (res) => { resolve(res.statusCode === 200); res.resume(); }
+    );
+    req.on('error', () => resolve(false));
+    req.end();
+  });
+}
+
+// ── Stream HuggingFace → R2 directly ──────────────────────────────────────
+async function streamToR2(hfUrl, r2Key, { accountId, accessKeyId, secretKey }) {
+  const res = await get(hfUrl);
+  if (res.statusCode === 404) { res.resume(); return 'not_found'; }
+  if (res.statusCode !== 200) { res.resume(); throw new Error(`HF HTTP ${res.statusCode}`); }
+
+  const contentLength = parseInt(res.headers['content-length'], 10);
+  if (!contentLength) throw new Error('content-length missing — cannot stream to R2');
+
+  const host = `${accountId}.r2.cloudflarestorage.com`;
+  const r2Path = `/${BUCKET_NAME}/${r2Key}`;
+  const type = contentType(r2Key);
+  const signed = sigV4('PUT', r2Path, { host }, secretKey, accessKeyId);
+
+  await new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: host, path: r2Path, method: 'PUT',
+      headers: {
+        ...signed,
+        'content-type': type,
+        'content-length': contentLength,
+        'cache-control': CACHE_CONTROL,
+      },
+    }, (r2Res) => {
+      let body = '';
+      r2Res.on('data', c => body += c);
+      r2Res.on('end', () => {
+        if (r2Res.statusCode >= 200 && r2Res.statusCode < 300) resolve();
+        else reject(new Error(`R2 PUT ${r2Res.statusCode}: ${body}`));
+      });
+    });
+    req.on('error', reject);
+
+    let done = 0;
+    res.on('data', chunk => {
+      done += chunk.length;
+      process.stdout.write(`\r  ${((done / contentLength) * 100).toFixed(1)}% (${(done / 1048576).toFixed(1)}/${(contentLength / 1048576).toFixed(1)} MB)`);
+    });
+    res.on('end', () => process.stdout.write('\n'));
+    res.pipe(req);
+  });
+
+  return 'uploaded';
+}
+
+// ── Download to local disk (local mode) ───────────────────────────────────
+async function downloadLocal(hfUrl, dest) {
+  if (fs.existsSync(dest)) return 'exists';
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+
+  const res = await get(hfUrl);
+  if (res.statusCode === 404) { res.resume(); return 'not_found'; }
+  if (res.statusCode !== 200) { res.resume(); throw new Error(`HTTP ${res.statusCode}`); }
+
+  const total = parseInt(res.headers['content-length'], 10);
+  let done = 0;
+  const file = fs.createWriteStream(dest);
+
+  await new Promise((resolve, reject) => {
+    res.on('data', chunk => {
+      done += chunk.length;
+      if (total) process.stdout.write(`\r  ${((done / total) * 100).toFixed(1)}% (${(done / 1048576).toFixed(1)}/${(total / 1048576).toFixed(1)} MB)`);
+    });
+    res.pipe(file);
+    file.on('finish', () => { if (total) process.stdout.write('\n'); resolve(); });
+    file.on('error', reject);
+  });
+
+  return 'downloaded';
+}
+
+// ── Copy WASM binaries from node_modules ──────────────────────────────────
+function copyWasm() {
+  console.log('\nCopying WASM files...');
+  const src = path.join(__dirname, '../node_modules/@xenova/transformers/dist');
+  if (!fs.existsSync(WASM_OUTPUT_DIR)) fs.mkdirSync(WASM_OUTPUT_DIR, { recursive: true });
+  for (const f of ['ort-wasm.wasm', 'ort-wasm-simd.wasm', 'ort-wasm-threaded.wasm', 'ort-wasm-simd-threaded.wasm']) {
+    const s = path.join(src, f);
+    if (fs.existsSync(s)) { fs.copyFileSync(s, path.join(WASM_OUTPUT_DIR, f)); console.log(`  ✓ ${f}`); }
+    else console.log(`  ⚠ not found: ${f}`);
+  }
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────
+async function main() {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
+  const secretKey = process.env.R2_SECRET_ACCESS_KEY;
+  const creds = { accountId, accessKeyId, secretKey };
+  const useR2 = !!(accountId && accessKeyId && secretKey);
 
   console.log('='.repeat(60));
-  console.log(`Whisper model: ${MODEL_ID}`);
-  console.log(useR2
-    ? 'R2 mode — skipping files already in R2, uploading new ones'
-    : 'Local mode — bundling model files into artifact');
-  console.log('='.repeat(60));
-  console.log('');
+  console.log(`Model: ${MODEL_ID}`);
+  console.log(useR2 ? `R2 mode  → streaming HuggingFace → ${BUCKET_NAME}` : 'Local mode → bundling into artifact');
+  console.log('='.repeat(60) + '\n');
 
-  // Fetch file list from HuggingFace API
   let fileList;
   try {
     fileList = await fetchFileList();
-  } catch (error) {
-    console.error('✗ Failed to fetch file list from HuggingFace:', error.message);
-    copyWasmFiles();
-    console.log('\n' + '='.repeat(60));
-    console.log('Build preparation complete (WASM only — model will load remotely at runtime)');
-    console.log('='.repeat(60));
+  } catch (err) {
+    console.error('✗ Failed to fetch file list:', err.message);
+    copyWasm();
     return;
   }
 
-  // In R2 mode: determine which files are already in R2 and skip them
-  let filesToDownload = fileList;
-  let r2SkipCount = 0;
-
   if (useR2) {
-    console.log('Checking R2 for existing files...');
-    filesToDownload = [];
+    let uploaded = 0, skipped = 0, failed = 0;
+
     for (const file of fileList) {
       const r2Key = `${MODEL_ID}/${file}`;
-      if (existsInR2(r2Key)) {
-        console.log(`✓ Already in R2: ${r2Key}`);
-        r2SkipCount++;
-      } else {
-        filesToDownload.push(file);
-      }
-    }
-    console.log('');
+      process.stdout.write(`  ${r2Key} ... `);
 
-    if (filesToDownload.length === 0) {
-      console.log(`✓ All ${fileList.length} model files already in R2 — skipping download`);
-      copyWasmFiles();
-      console.log('\n' + '='.repeat(60));
-      console.log('Build preparation complete!');
-      console.log('='.repeat(60));
-      return;
-    }
+      const exists = await existsInR2(r2Key, creds);
+      if (exists) { console.log('skip'); skipped++; continue; }
 
-    console.log(`${r2SkipCount} files already in R2. Downloading ${filesToDownload.length} new files...`);
-  }
-
-  console.log('');
-  if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-
-  let successCount = 0, existsCount = 0, notFoundCount = 0, failCount = 0;
-
-  for (const file of filesToDownload) {
-    const url = `${BASE_URL}/${file}`;
-    const dest = path.join(OUTPUT_DIR, file);
-    try {
-      const result = await downloadFile(url, dest);
-      if (result.status === 'success') successCount++;
-      else if (result.status === 'exists') existsCount++;
-      else if (result.status === 'not_found') notFoundCount++;
-    } catch (error) {
-      console.error(`✗ Failed to download ${file}:`, error.message);
-      failCount++;
-    }
-  }
-
-  console.log('');
-  console.log('='.repeat(60));
-  console.log(`Downloaded: ${successCount}, cached locally: ${existsCount}, not found: ${notFoundCount}, failed: ${failCount}`);
-  console.log('='.repeat(60));
-
-  // Verify critical files (only for those we actually downloaded)
-  if (!useR2 || filesToDownload.length > 0) {
-    const criticalFiles = ['config.json', 'tokenizer_config.json', 'tokenizer.json'];
-    const criticalToCheck = useR2
-      ? criticalFiles.filter(f => filesToDownload.includes(f))
-      : criticalFiles;
-
-    if (criticalToCheck.length > 0) {
-      console.log('');
-      console.log('Verifying critical files...');
-      let allPresent = true;
-      for (const file of criticalToCheck) {
-        const filePath = path.join(OUTPUT_DIR, file);
-        if (fs.existsSync(filePath)) {
-          console.log(`✓ ${file}`);
-        } else {
-          console.log(`✗ MISSING: ${file}`);
-          allPresent = false;
-        }
-      }
-      if (!allPresent) {
-        console.log('\n✗ Build failed: critical model files are missing.');
-        process.exit(1);
-      }
-    }
-  }
-
-  // Upload newly downloaded files to R2, then remove locals
-  if (useR2 && fs.existsSync(OUTPUT_DIR)) {
-    console.log('');
-    console.log('='.repeat(60));
-    console.log(`Uploading ${filesToDownload.length} new files to R2 bucket: ${BUCKET_NAME}`);
-    console.log('='.repeat(60));
-    console.log('');
-
-    let uploaded = 0, failed = 0;
-    for (const localPath of getAllLocalFiles(OUTPUT_DIR)) {
+      console.log('uploading');
       try {
-        uploadFileToR2(localPath);
-        uploaded++;
+        const status = await streamToR2(`${HF_BASE}/${file}`, r2Key, creds);
+        if (status === 'not_found') console.log(`  ⚠ not on HuggingFace`);
+        else { console.log(`  ✓ done`); uploaded++; }
       } catch (err) {
-        console.error(` ✗ failed: ${err.stderr?.toString() || err.message}`);
+        console.error(`  ✗ ${err.message}`);
         failed++;
       }
     }
 
-    console.log('');
-    console.log(`R2 upload: ${uploaded} uploaded, ${failed} failed`);
-    if (failed > 0) {
-      console.error('✗ Upload failures. Build aborted.');
-      process.exit(1);
+    console.log('\n' + '='.repeat(60));
+    console.log(`Uploaded: ${uploaded}  Skipped: ${skipped}  Failed: ${failed}`);
+    if (failed > 0) { console.error('✗ Upload failures. Build aborted.'); process.exit(1); }
+
+  } else {
+    if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+    let downloaded = 0, cached = 0, notFound = 0, failed = 0;
+
+    for (const file of fileList) {
+      const dest = path.join(OUTPUT_DIR, file);
+      console.log(`Downloading: ${file}`);
+      try {
+        const status = await downloadLocal(`${HF_BASE}/${file}`, dest);
+        if (status === 'downloaded') downloaded++;
+        else if (status === 'exists') { console.log('  ✓ already exists'); cached++; }
+        else { console.log('  ⚠ not available (404)'); notFound++; }
+      } catch (err) {
+        console.error(`  ✗ ${err.message}`);
+        failed++;
+      }
     }
 
-    fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
-    console.log('✓ Local model files removed (served from R2)');
+    console.log('\n' + '='.repeat(60));
+    console.log(`Downloaded: ${downloaded}  Cached: ${cached}  Not found: ${notFound}  Failed: ${failed}`);
+
+    const critical = ['config.json', 'tokenizer_config.json', 'tokenizer.json'];
+    const missing = critical.filter(f => !fs.existsSync(path.join(OUTPUT_DIR, f)));
+    if (missing.length > 0) {
+      console.error(`\n✗ Missing critical files: ${missing.join(', ')}`);
+      process.exit(1);
+    }
   }
 
-  copyWasmFiles();
-
-  console.log('');
-  console.log('='.repeat(60));
+  copyWasm();
+  console.log('\n' + '='.repeat(60));
   console.log('Build preparation complete!');
   console.log('='.repeat(60));
 }
 
-// Run the download
-downloadModels().catch((error) => {
-  console.error('Download failed:', error);
-  process.exit(1);
-});
-
+main().catch(err => { console.error('Fatal:', err); process.exit(1); });
