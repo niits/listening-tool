@@ -331,8 +331,9 @@ async function downloadModels() {
   
   if (!allCriticalPresent) {
     console.log('');
-    console.log('⚠ WARNING: Some critical files are missing!');
-    console.log('The model may fall back to downloading from HuggingFace at runtime.');
+    console.log('✗ Build failed: critical model files are missing.');
+    console.log('Run the build again with network access to download model files.');
+    process.exit(1);
   }
   
   // Copy WASM files
