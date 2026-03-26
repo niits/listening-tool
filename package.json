@@ -1,0 +1,38 @@
+{
+  "name": "listening-tool",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n next,wrangler -c cyan,yellow \"next dev --port 3000\" \"wrangler pages dev --proxy 3000\"",
+    "build": "next build",
+    "preview": "next build && wrangler pages dev out/",
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "r2:bucket": "wrangler r2 bucket create listening-tool-models --remote",
+    "r2:upload": "node scripts/upload-to-r2.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "dexie": "4.3.0",
+    "motion": "^12.38.0",
+    "next": "16.2.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.1",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "wrangler": "^4.77.0"
+  },
+  "packageManager": "yarn@4.13.0"
+}
