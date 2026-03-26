@@ -13,7 +13,7 @@ import {
   MODEL_ID,
   MODEL_BASE_URL,
   WASM_BASE_URL,
-} from "../config/model.config";
+} from "../lib/model.config";
 import type {
   WorkerInMessage,
   WorkerOutMessage,

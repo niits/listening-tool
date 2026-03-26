@@ -5,7 +5,7 @@
 
 import { db } from "./db";
 import type { TranscriptRecord } from "./types";
-import { MODEL_ID } from "../config/model.config";
+import { MODEL_ID } from "./model.config";
 
 function makeKey(audioHash: string, segmentIndex: number): string {
   return `${audioHash}-${segmentIndex}`;
