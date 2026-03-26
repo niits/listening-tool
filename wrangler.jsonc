@@ -1,0 +1,16 @@
+{
+	"name": "listening-tool",
+	"compatibility_date": "2024-09-23",
+	"pages_build_output_dir": "out",
+	"r2_buckets": [
+		{
+			"binding": "MODELS",
+			"bucket_name": "listening-tool-models"
+		},
+		{
+			"bucket_name": "listening-tool-models",
+			"binding": "listening_tool_models",
+			"remote": true
+		}
+	]
+}
